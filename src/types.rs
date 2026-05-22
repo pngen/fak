@@ -22,7 +22,11 @@ impl ExecutionTrace {
         steps: Vec<serde_json::Value>,
         metadata: serde_json::Map<String, serde_json::Value>,
     ) -> Self {
-        Self { id, steps, metadata }
+        Self {
+            id,
+            steps,
+            metadata,
+        }
     }
 
     pub fn validate(&self) -> FakResult<()> {
@@ -355,7 +359,11 @@ impl ProofBundle {
         witnesses: Vec<ProofWitness>,
         metadata: serde_json::Map<String, serde_json::Value>,
     ) -> Self {
-        Self { id, witnesses, metadata }
+        Self {
+            id,
+            witnesses,
+            metadata,
+        }
     }
 
     pub fn validate(&self) -> FakResult<()> {
@@ -403,10 +411,14 @@ impl ProofType {
     pub fn from_str(s: &str) -> FakResult<Self> {
         match s.trim().to_lowercase().as_str() {
             "behavioral_soundness" | "behavioralsoundness" => Ok(Self::BehavioralSoundness),
-            "authority_non_escalation" | "authoritynonescalation" => Ok(Self::AuthorityNonEscalation),
+            "authority_non_escalation" | "authoritynonescalation" => {
+                Ok(Self::AuthorityNonEscalation)
+            }
             "economic_invariance" | "economicinvariance" => Ok(Self::EconomicInvariance),
             "semantic_preservation" | "semanticpreservation" => Ok(Self::SemanticPreservation),
-            _ => Err(FakError::UnknownProofType { value: s.to_string() }),
+            _ => Err(FakError::UnknownProofType {
+                value: s.to_string(),
+            }),
         }
     }
 
@@ -462,7 +474,12 @@ impl<'a> VerificationContext<'a> {
         cost_ledger: &'a CostLedger,
         policy_ir: &'a PolicyIR,
     ) -> Self {
-        Self { trace, capabilities, cost_ledger, policy_ir }
+        Self {
+            trace,
+            capabilities,
+            cost_ledger,
+            policy_ir,
+        }
     }
 }
 
@@ -483,7 +500,13 @@ fn canonical_json(value: &serde_json::Value) -> String {
             keys.sort();
             let pairs: Vec<String> = keys
                 .into_iter()
-                .map(|k| format!("{}:{}", serde_json::to_string(k).unwrap_or_default(), canonical_json(&map[k])))
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        serde_json::to_string(k).unwrap_or_default(),
+                        canonical_json(&map[k])
+                    )
+                })
                 .collect();
             format!("{{{}}}", pairs.join(","))
         }

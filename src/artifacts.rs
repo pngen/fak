@@ -3,8 +3,7 @@
 use crate::engine::ProofEngine;
 use crate::error::{FakError, FakResult};
 use crate::types::{
-    CapabilityManifest, CostLedger, ExecutionTrace, PolicyIR, ProofBundle,
-    compute_content_hash,
+    compute_content_hash, CapabilityManifest, CostLedger, ExecutionTrace, PolicyIR, ProofBundle,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -106,7 +105,7 @@ impl ArtifactManager {
         &self,
         artifact_id: &str,
         artifact: &serde_json::Value,
-        name: &str,
+        _name: &str,
     ) -> FakResult<()> {
         if !self.validate_artifact_integrity(artifact_id, artifact) {
             return Err(FakError::IntegrityFailure {

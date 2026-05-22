@@ -37,8 +37,8 @@ impl InvariantDSL {
         let temporal_properties = Self::parse_temporal_properties_list(
             fields.get("temporal_properties").map(|s| s.as_str()),
         );
-        let invariant_type = Self::extract_type(&spec_str_clean)
-            .unwrap_or(ProofType::BehavioralSoundness);
+        let invariant_type =
+            Self::extract_type(&spec_str_clean).unwrap_or(ProofType::BehavioralSoundness);
 
         Ok(InvariantSpec {
             name,
@@ -59,7 +59,11 @@ impl InvariantDSL {
                 } else {
                     line.trim()
                 };
-                if trimmed.is_empty() { None } else { Some(trimmed) }
+                if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                }
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -85,7 +89,12 @@ impl InvariantDSL {
 
     fn extract_fields(spec_str: &str) -> HashMap<String, String> {
         let mut fields = HashMap::new();
-        for field_name in &["description", "precondition", "postcondition", "temporal_properties"] {
+        for field_name in &[
+            "description",
+            "precondition",
+            "postcondition",
+            "temporal_properties",
+        ] {
             if let Some(value) = Self::extract_field_value(spec_str, field_name) {
                 fields.insert(field_name.to_string(), value);
             }
@@ -104,13 +113,11 @@ impl InvariantDSL {
 
     fn parse_temporal_properties_list(props_str: Option<&str>) -> Vec<String> {
         match props_str {
-            Some(s) if s.starts_with('[') && s.ends_with(']') => {
-                s[1..s.len() - 1]
-                    .split(',')
-                    .map(|p| p.trim().to_string())
-                    .filter(|p| !p.is_empty())
-                    .collect()
-            }
+            Some(s) if s.starts_with('[') && s.ends_with(']') => s[1..s.len() - 1]
+                .split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect(),
             _ => Vec::new(),
         }
     }
