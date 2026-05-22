@@ -10,13 +10,21 @@ pub enum FakError {
     /// Artifact not found
     ArtifactNotFound { artifact_id: String },
     /// Artifact integrity check failed
-    IntegrityFailure { artifact_id: String, expected: String, actual: String },
+    IntegrityFailure {
+        artifact_id: String,
+        expected: String,
+        actual: String,
+    },
     /// Invariant parsing error
     ParseError { source: String, message: String },
     /// Invariant verification failed
     VerificationFailure { invariant: String, reason: String },
     /// Resource limit exceeded
-    ResourceLimit { resource: String, limit: usize, actual: usize },
+    ResourceLimit {
+        resource: String,
+        limit: usize,
+        actual: usize,
+    },
     /// Timeout during verification
     Timeout { operation: String, limit_secs: f64 },
     /// Serialization error
@@ -38,9 +46,16 @@ impl fmt::Display for FakError {
             Self::ArtifactNotFound { artifact_id } => {
                 write!(f, "artifact '{}' not found", artifact_id)
             }
-            Self::IntegrityFailure { artifact_id, expected, actual } => {
-                write!(f, "integrity check failed for '{}': expected '{}', got '{}'", 
-                       artifact_id, expected, actual)
+            Self::IntegrityFailure {
+                artifact_id,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "integrity check failed for '{}': expected '{}', got '{}'",
+                    artifact_id, expected, actual
+                )
             }
             Self::ParseError { source, message } => {
                 write!(f, "parse error in '{}': {}", source, message)
@@ -48,10 +63,17 @@ impl fmt::Display for FakError {
             Self::VerificationFailure { invariant, reason } => {
                 write!(f, "verification failed for '{}': {}", invariant, reason)
             }
-            Self::ResourceLimit { resource, limit, actual } => {
+            Self::ResourceLimit {
+                resource,
+                limit,
+                actual,
+            } => {
                 write!(f, "{} limit exceeded: {} > {}", resource, actual, limit)
             }
-            Self::Timeout { operation, limit_secs } => {
+            Self::Timeout {
+                operation,
+                limit_secs,
+            } => {
                 write!(f, "{} timed out after {}s", operation, limit_secs)
             }
             Self::Serialization { message } => {
@@ -77,12 +99,16 @@ pub type FakResult<T> = Result<T, FakError>;
 
 impl From<serde_json::Error> for FakError {
     fn from(e: serde_json::Error) -> Self {
-        Self::Serialization { message: e.to_string() }
+        Self::Serialization {
+            message: e.to_string(),
+        }
     }
 }
 
 impl<T> From<std::sync::PoisonError<T>> for FakError {
     fn from(_: std::sync::PoisonError<T>) -> Self {
-        Self::LockPoisoned { resource: "mutex".to_string() }
+        Self::LockPoisoned {
+            resource: "mutex".to_string(),
+        }
     }
 }

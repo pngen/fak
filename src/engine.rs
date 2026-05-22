@@ -1,8 +1,8 @@
 //! Proof engine for FAK.
 use crate::error::{FakError, FakResult};
 use crate::types::{
-    CapabilityManifest, CostLedger, CounterExample, ExecutionTrace, InvariantSpec,
-    PolicyIR, ProofBundle, ProofType, ProofWitness, compute_content_hash,
+    compute_content_hash, CapabilityManifest, CostLedger, CounterExample, ExecutionTrace,
+    InvariantSpec, PolicyIR, ProofBundle, ProofType, ProofWitness,
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 

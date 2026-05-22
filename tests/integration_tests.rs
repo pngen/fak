@@ -1,9 +1,8 @@
 //! Integration tests for FAK deployment validation.
 
 use fak::{
-    ArtifactManager, FakError, InvariantDSL, ProofEngine, Verifier,
-    CapabilityManifest, CostLedger, ExecutionTrace, InvariantSpec, 
-    PolicyIR, ProofType, compute_content_hash,
+    compute_content_hash, ArtifactManager, CapabilityManifest, CostLedger, ExecutionTrace,
+    FakError, InvariantDSL, InvariantSpec, PolicyIR, ProofEngine, ProofType, Verifier,
 };
 use std::collections::HashMap;
 
@@ -21,7 +20,10 @@ fn sample_trace() -> ExecutionTrace {
 
 fn sample_capabilities() -> CapabilityManifest {
     let mut graph = HashMap::new();
-    graph.insert("admin".to_string(), vec!["read".to_string(), "write".to_string()]);
+    graph.insert(
+        "admin".to_string(),
+        vec!["read".to_string(), "write".to_string()],
+    );
     CapabilityManifest::new(
         "cap-001".to_string(),
         "agent-001".to_string(),
@@ -179,14 +181,16 @@ fn test_proof_engine_resource_limit() {
     let policy = sample_policy_ir();
 
     let too_many: Vec<InvariantSpec> = (0..1001)
-        .map(|i| InvariantSpec::new(
-            format!("inv_{}", i),
-            String::new(),
-            None,
-            None,
-            vec![],
-            ProofType::BehavioralSoundness,
-        ))
+        .map(|i| {
+            InvariantSpec::new(
+                format!("inv_{}", i),
+                String::new(),
+                None,
+                None,
+                vec![],
+                ProofType::BehavioralSoundness,
+            )
+        })
         .collect();
 
     let result = engine.verify_invariants(&trace, &caps, &cost, &policy, &too_many);
@@ -255,11 +259,16 @@ fn test_verifier_json_output() {
     let cost = sample_cost_ledger();
     let policy = sample_policy_ir();
 
-    let bundle = mgr.create_bundle(&trace, &caps, &cost, &policy).expect("bundle");
+    let bundle = mgr
+        .create_bundle(&trace, &caps, &cost, &policy)
+        .expect("bundle");
     let verifier = Verifier::new();
     let json = verifier.verify_bundle_json(&bundle);
 
-    assert!(json.get("success").and_then(|v| v.as_bool()).unwrap_or(false));
+    assert!(json
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false));
     assert!(json.get("bundle_id").is_some());
 }
 
@@ -383,7 +392,12 @@ fn test_cost_ledger_validation() {
         Err(FakError::Validation { field, .. }) if field == "total_cost"
     ));
 
-    let inf = CostLedger::new("id".to_string(), vec![], f64::INFINITY, serde_json::Map::new());
+    let inf = CostLedger::new(
+        "id".to_string(),
+        vec![],
+        f64::INFINITY,
+        serde_json::Map::new(),
+    );
     assert!(matches!(
         inf.validate(),
         Err(FakError::Validation { field, .. }) if field == "total_cost"
@@ -392,7 +406,12 @@ fn test_cost_ledger_validation() {
 
 #[test]
 fn test_policy_ir_validation() {
-    let empty = PolicyIR::new(String::new(), serde_json::Map::new(), vec![], serde_json::Map::new());
+    let empty = PolicyIR::new(
+        String::new(),
+        serde_json::Map::new(),
+        vec![],
+        serde_json::Map::new(),
+    );
     assert!(matches!(
         empty.validate(),
         Err(FakError::Validation { field, .. }) if field == "id"
@@ -421,29 +440,62 @@ fn test_invariant_spec_validation() {
 
 #[test]
 fn test_proof_type_from_str() {
-    assert!(matches!(ProofType::from_str("behavioral_soundness"), Ok(ProofType::BehavioralSoundness)));
-    assert!(matches!(ProofType::from_str("authority_non_escalation"), Ok(ProofType::AuthorityNonEscalation)));
-    assert!(matches!(ProofType::from_str("economic_invariance"), Ok(ProofType::EconomicInvariance)));
-    assert!(matches!(ProofType::from_str("semantic_preservation"), Ok(ProofType::SemanticPreservation)));
-    
+    assert!(matches!(
+        ProofType::from_str("behavioral_soundness"),
+        Ok(ProofType::BehavioralSoundness)
+    ));
+    assert!(matches!(
+        ProofType::from_str("authority_non_escalation"),
+        Ok(ProofType::AuthorityNonEscalation)
+    ));
+    assert!(matches!(
+        ProofType::from_str("economic_invariance"),
+        Ok(ProofType::EconomicInvariance)
+    ));
+    assert!(matches!(
+        ProofType::from_str("semantic_preservation"),
+        Ok(ProofType::SemanticPreservation)
+    ));
+
     // Case insensitive
-    assert!(matches!(ProofType::from_str("BEHAVIORAL_SOUNDNESS"), Ok(ProofType::BehavioralSoundness)));
-    
+    assert!(matches!(
+        ProofType::from_str("BEHAVIORAL_SOUNDNESS"),
+        Ok(ProofType::BehavioralSoundness)
+    ));
+
     // Unknown
-    assert!(matches!(ProofType::from_str("unknown"), Err(FakError::UnknownProofType { .. })));
+    assert!(matches!(
+        ProofType::from_str("unknown"),
+        Err(FakError::UnknownProofType { .. })
+    ));
 }
 
 #[test]
 fn test_proof_type_as_str() {
-    assert_eq!(ProofType::BehavioralSoundness.as_str(), "behavioral_soundness");
-    assert_eq!(ProofType::AuthorityNonEscalation.as_str(), "authority_non_escalation");
-    assert_eq!(ProofType::EconomicInvariance.as_str(), "economic_invariance");
-    assert_eq!(ProofType::SemanticPreservation.as_str(), "semantic_preservation");
+    assert_eq!(
+        ProofType::BehavioralSoundness.as_str(),
+        "behavioral_soundness"
+    );
+    assert_eq!(
+        ProofType::AuthorityNonEscalation.as_str(),
+        "authority_non_escalation"
+    );
+    assert_eq!(
+        ProofType::EconomicInvariance.as_str(),
+        "economic_invariance"
+    );
+    assert_eq!(
+        ProofType::SemanticPreservation.as_str(),
+        "semantic_preservation"
+    );
 }
 
 #[test]
 fn test_proof_type_display() {
-    assert_eq!(format!("{}", ProofType::BehavioralSoundness), "behavioral_soundness");
+    assert_eq!(
+        format!("{}", ProofType::BehavioralSoundness),
+        "behavioral_soundness"
+    );
 }
 
 // ============================================================================
@@ -522,16 +574,14 @@ fn test_full_workflow() {
     let policy = sample_policy_ir();
 
     // 2. Define invariants
-    let invariants = vec![
-        InvariantSpec::new(
-            "economic_check".to_string(),
-            "Costs must be non-negative".to_string(),
-            None,
-            Some("total_cost >= 0".to_string()),
-            vec![],
-            ProofType::EconomicInvariance,
-        ),
-    ];
+    let invariants = vec![InvariantSpec::new(
+        "economic_check".to_string(),
+        "Costs must be non-negative".to_string(),
+        None,
+        Some("total_cost >= 0".to_string()),
+        vec![],
+        ProofType::EconomicInvariance,
+    )];
 
     // 3. Create proof
     let engine = ProofEngine::new();

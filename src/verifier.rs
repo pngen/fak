@@ -1,7 +1,6 @@
 //! Standalone verifier for FAK proof bundles.
 
 use crate::engine::{EngineConfig, ProofEngine};
-use crate::error::FakResult;
 use crate::types::{compute_content_hash, ProofBundle, ProofWitness};
 use serde::{Deserialize, Serialize};
 
