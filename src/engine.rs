@@ -4,6 +4,7 @@ use crate::types::{
     compute_content_hash, CapabilityManifest, CostLedger, CounterExample, ExecutionTrace,
     InvariantSpec, PolicyIR, ProofBundle, ProofType, ProofWitness,
 };
+use serde::Serialize;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Configuration for proof engine resource limits.
@@ -103,11 +104,14 @@ impl ProofEngine {
         }
 
         let proof_content = serde_json::json!({
-            "trace_id": trace.id,
-            "capabilities_id": capabilities.id,
-            "cost_ledger_id": cost_ledger.id,
-            "policy_ir_id": policy_ir.id,
-            "invariant_names": invariants.iter().map(|i| &i.name).collect::<Vec<_>>(),
+            "trace_hash": content_hash_for(trace)?,
+            "capabilities_hash": content_hash_for(capabilities)?,
+            "cost_ledger_hash": content_hash_for(cost_ledger)?,
+            "policy_ir_hash": content_hash_for(policy_ir)?,
+            "invariant_hashes": invariants
+                .iter()
+                .map(content_hash_for)
+                .collect::<FakResult<Vec<_>>>()?,
         });
 
         let proof_id = compute_content_hash(&proof_content);
@@ -212,6 +216,11 @@ impl ProofEngine {
             metadata: serde_json::Map::new(),
         })
     }
+}
+
+fn content_hash_for<T: Serialize>(value: &T) -> FakResult<String> {
+    let json = serde_json::to_value(value)?;
+    Ok(compute_content_hash(&json))
 }
 
 impl Default for ProofEngine {

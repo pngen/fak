@@ -37,8 +37,7 @@ impl InvariantDSL {
         let temporal_properties = Self::parse_temporal_properties_list(
             fields.get("temporal_properties").map(|s| s.as_str()),
         );
-        let invariant_type =
-            Self::extract_type(&spec_str_clean).unwrap_or(ProofType::BehavioralSoundness);
+        let invariant_type = Self::extract_type(&spec_str_clean)?;
 
         Ok(InvariantSpec {
             name,
@@ -80,11 +79,11 @@ impl InvariantDSL {
             })
     }
 
-    fn extract_type(spec_str: &str) -> Option<ProofType> {
-        get_type_re()
-            .captures(spec_str)
-            .and_then(|c| c.get(1))
-            .and_then(|m| ProofType::from_str(m.as_str()).ok())
+    fn extract_type(spec_str: &str) -> FakResult<ProofType> {
+        match get_type_re().captures(spec_str).and_then(|c| c.get(1)) {
+            Some(m) => ProofType::from_str(m.as_str()),
+            None => Ok(ProofType::BehavioralSoundness),
+        }
     }
 
     fn extract_fields(spec_str: &str) -> HashMap<String, String> {
