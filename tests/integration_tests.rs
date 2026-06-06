@@ -272,6 +272,35 @@ fn test_verifier_json_output() {
     assert!(json.get("bundle_id").is_some());
 }
 
+#[test]
+fn test_verifier_rejects_tampered_witness_content_with_same_ids() {
+    let engine = ProofEngine::new();
+    let trace = sample_trace();
+    let caps = sample_capabilities();
+    let cost = sample_cost_ledger();
+    let policy = sample_policy_ir();
+
+    let witness = engine
+        .verify_invariants(&trace, &caps, &cost, &policy, &[])
+        .expect("verify");
+    let mut bundle = engine.generate_bundle(&[witness]).expect("bundle");
+
+    bundle.witnesses[0]
+        .execution_trace
+        .metadata
+        .insert("tampered".to_string(), serde_json::json!(true));
+
+    let verifier = Verifier::new();
+    let result = verifier.verify_bundle(&bundle);
+
+    assert!(!result.success);
+    assert!(result.witness_results[0]
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("Proof ID mismatch"));
+}
+
 // ============================================================================
 // DSL Tests
 // ============================================================================
@@ -311,6 +340,17 @@ fn test_dsl_missing_name() {
     let spec = "precondition: x > 0";
     let result = InvariantDSL::parse_invariant(spec);
     assert!(matches!(result, Err(FakError::ParseError { .. })));
+}
+
+#[test]
+fn test_dsl_unknown_type_fails() {
+    let spec = r#"
+        invariant invalid_type
+        type: impossible
+    "#;
+
+    let result = InvariantDSL::parse_invariant(spec);
+    assert!(matches!(result, Err(FakError::UnknownProofType { .. })));
 }
 
 #[test]
