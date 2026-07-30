@@ -123,6 +123,12 @@ pub struct CostLedger {
 }
 
 impl CostLedger {
+    /// Relative tolerance for reconciling `total_cost` with the ordered entry sum.
+    ///
+    /// The comparison has no absolute-error floor, so a computed zero total only
+    /// matches an exact zero (including when `entries` is empty).
+    pub const TOTAL_COST_RELATIVE_EPSILON: f64 = 1e-9;
+
     pub fn new(
         id: String,
         entries: Vec<serde_json::Value>,
@@ -154,6 +160,68 @@ impl CostLedger {
             return Err(FakError::Validation {
                 field: "total_cost".to_string(),
                 message: "CostLedger total_cost must be finite".to_string(),
+            });
+        }
+
+        // Kahan summation preserves the ledger's deterministic entry order while
+        // limiting avoidable floating-point accumulation error.
+        let mut computed_total = 0.0_f64;
+        let mut compensation = 0.0_f64;
+        for (index, entry) in self.entries.iter().enumerate() {
+            let entry_object = entry.as_object().ok_or_else(|| FakError::Validation {
+                field: format!("entries[{}]", index),
+                message: "CostLedger entry must be an object".to_string(),
+            })?;
+            let cost = entry_object
+                .get("cost")
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| FakError::Validation {
+                    field: format!("entries[{}].cost", index),
+                    message: "CostLedger entry cost must be a numeric value".to_string(),
+                })?;
+
+            if !cost.is_finite() {
+                return Err(FakError::Validation {
+                    field: format!("entries[{}].cost", index),
+                    message: "CostLedger entry cost must be finite".to_string(),
+                });
+            }
+            if cost < 0.0 {
+                return Err(FakError::Validation {
+                    field: format!("entries[{}].cost", index),
+                    message: "CostLedger entry cost cannot be negative".to_string(),
+                });
+            }
+
+            let adjusted_cost = cost - compensation;
+            let next_total = computed_total + adjusted_cost;
+            compensation = (next_total - computed_total) - adjusted_cost;
+            computed_total = next_total;
+
+            if !computed_total.is_finite() {
+                return Err(FakError::Validation {
+                    field: "entries".to_string(),
+                    message: "CostLedger entry cost sum must be finite".to_string(),
+                });
+            }
+        }
+
+        let difference = (self.total_cost - computed_total).abs();
+        let relative_scale = self.total_cost.abs().max(computed_total.abs());
+        let totals_match = if relative_scale == 0.0 {
+            difference == 0.0
+        } else {
+            difference <= Self::TOTAL_COST_RELATIVE_EPSILON * relative_scale
+        };
+        if !totals_match {
+            return Err(FakError::Validation {
+                field: "total_cost".to_string(),
+                message: format!(
+                    "CostLedger total_cost {} does not match entry sum {} within relative epsilon {}",
+                    self.total_cost,
+                    computed_total,
+                    Self::TOTAL_COST_RELATIVE_EPSILON
+                ),
             });
         }
         Ok(())
@@ -254,6 +322,22 @@ impl InvariantSpec {
                 message: "InvariantSpec must have a non-empty name".to_string(),
             });
         }
+        let has_postcondition = self
+            .postcondition
+            .as_deref()
+            .map_or(false, |value| !value.trim().is_empty());
+        let has_temporal_property = self
+            .temporal_properties
+            .iter()
+            .any(|value| !value.trim().is_empty());
+        if !has_postcondition && !has_temporal_property {
+            return Err(FakError::Validation {
+                field: "invariant".to_string(),
+                message:
+                    "InvariantSpec must contain at least one postcondition or temporal property"
+                        .to_string(),
+            });
+        }
         Ok(())
     }
 }
@@ -324,6 +408,15 @@ impl ProofWitness {
         self.capability_manifest.validate()?;
         self.cost_ledger.validate()?;
         self.policy_ir.validate()?;
+        if self.invariants.is_empty() {
+            return Err(FakError::Validation {
+                field: "invariants".to_string(),
+                message: "ProofWitness must contain at least one invariant".to_string(),
+            });
+        }
+        for invariant in &self.invariants {
+            invariant.validate()?;
+        }
         Ok(())
     }
 }
@@ -371,6 +464,12 @@ impl ProofBundle {
             return Err(FakError::Validation {
                 field: "id".to_string(),
                 message: "ProofBundle must have a non-empty ID".to_string(),
+            });
+        }
+        if self.witnesses.is_empty() {
+            return Err(FakError::Validation {
+                field: "witnesses".to_string(),
+                message: "ProofBundle must contain at least one witness".to_string(),
             });
         }
         if self.witnesses.len() > Self::MAX_WITNESSES {

@@ -1,8 +1,10 @@
 //! Integration tests for FAK deployment validation.
 
+use fak::engine::{EngineConfig, PROOF_ALGORITHM_VERSION};
 use fak::{
-    compute_content_hash, ArtifactManager, CapabilityManifest, CostLedger, ExecutionTrace,
-    FakError, InvariantDSL, InvariantSpec, PolicyIR, ProofEngine, ProofType, Verifier,
+    compute_content_hash, ArtifactManager, CapabilityManifest, CostLedger, CounterExample,
+    ExecutionTrace, FakError, InvariantDSL, InvariantSpec, PolicyIR, ProofBundle, ProofEngine,
+    ProofType, Verifier,
 };
 use std::collections::HashMap;
 
@@ -51,6 +53,17 @@ fn sample_policy_ir() -> PolicyIR {
         vec![0x00, 0x01],
         serde_json::Map::new(),
     )
+}
+
+fn valid_invariants() -> Vec<InvariantSpec> {
+    vec![InvariantSpec::new(
+        "cost_non_negative".to_string(),
+        "Cost must be non-negative".to_string(),
+        None,
+        Some("total_cost >= 0".to_string()),
+        vec![],
+        ProofType::EconomicInvariance,
+    )]
 }
 
 // ============================================================================
@@ -117,6 +130,55 @@ fn test_artifact_manager_clone() {
     assert!(cloned.contains(&id).expect("cloned contains artifact"));
 }
 
+#[test]
+fn test_artifact_manager_legacy_bundle_creation_fails_closed() {
+    let mgr = ArtifactManager::new();
+    let trace = sample_trace();
+    let caps = sample_capabilities();
+    let cost = sample_cost_ledger();
+    let policy = sample_policy_ir();
+
+    let result = mgr.create_bundle(&trace, &caps, &cost, &policy);
+    assert!(matches!(
+        result,
+        Err(FakError::Validation { field, .. }) if field == "invariants"
+    ));
+
+    let trace_json = serde_json::to_value(&trace).expect("serialize trace");
+    let trace_id = compute_content_hash(&trace_json);
+    assert!(!mgr.contains(&trace_id).expect("contains check"));
+}
+
+#[test]
+fn test_artifact_manager_does_not_store_inputs_when_verification_fails() {
+    let mgr = ArtifactManager::new();
+    let trace = sample_trace();
+    let caps = sample_capabilities();
+    let inconsistent_cost = CostLedger::new(
+        "cost-001".to_string(),
+        vec![serde_json::json!({"cost": 100.0})],
+        0.0,
+        serde_json::Map::new(),
+    );
+    let policy = sample_policy_ir();
+
+    let result = mgr.create_bundle_with_invariants(
+        &trace,
+        &caps,
+        &inconsistent_cost,
+        &policy,
+        &valid_invariants(),
+    );
+    assert!(matches!(
+        result,
+        Err(FakError::Validation { field, .. }) if field == "total_cost"
+    ));
+
+    let trace_json = serde_json::to_value(&trace).expect("serialize trace");
+    let trace_id = compute_content_hash(&trace_json);
+    assert!(!mgr.contains(&trace_id).expect("contains check"));
+}
+
 // ============================================================================
 // ProofEngine Tests
 // ============================================================================
@@ -129,12 +191,11 @@ fn test_proof_engine_verify_empty_invariants() {
     let cost = sample_cost_ledger();
     let policy = sample_policy_ir();
 
-    let witness = engine
-        .verify_invariants(&trace, &caps, &cost, &policy, &[])
-        .expect("verification should succeed");
-
-    assert!(!witness.proof_id.is_empty());
-    assert!(witness.counterexamples.is_empty());
+    let result = engine.verify_invariants(&trace, &caps, &cost, &policy, &[]);
+    assert!(matches!(
+        result,
+        Err(FakError::Validation { field, .. }) if field == "invariants"
+    ));
 }
 
 #[test]
@@ -158,7 +219,7 @@ fn test_proof_engine_with_invariants() {
             "policy_valid".to_string(),
             "Policy must have ID".to_string(),
             None,
-            None,
+            Some("policy_id_nonempty".to_string()),
             vec![],
             ProofType::SemanticPreservation,
         ),
@@ -209,7 +270,7 @@ fn test_proof_engine_generate_bundle() {
     let policy = sample_policy_ir();
 
     let witness = engine
-        .verify_invariants(&trace, &caps, &cost, &policy, &[])
+        .verify_invariants(&trace, &caps, &cost, &policy, &valid_invariants())
         .expect("verify");
 
     let bundle = engine.generate_bundle(&[witness]).expect("bundle");
@@ -227,6 +288,110 @@ fn test_proof_engine_empty_witnesses_rejected() {
     ));
 }
 
+#[test]
+fn test_proof_engine_rejects_invalid_configuration() {
+    let trace = sample_trace();
+    let caps = sample_capabilities();
+    let cost = sample_cost_ledger();
+    let policy = sample_policy_ir();
+
+    let zero_limit = ProofEngine::with_config(EngineConfig {
+        max_invariants: 0,
+        timeout_secs: 30.0,
+    });
+    assert!(matches!(
+        zero_limit.verify_invariants(&trace, &caps, &cost, &policy, &valid_invariants()),
+        Err(FakError::Validation { field, .. }) if field == "max_invariants"
+    ));
+
+    let invalid_timeout = ProofEngine::with_config(EngineConfig {
+        max_invariants: 1000,
+        timeout_secs: f64::NAN,
+    });
+    assert!(matches!(
+        invalid_timeout.verify_invariants(&trace, &caps, &cost, &policy, &valid_invariants()),
+        Err(FakError::Validation { field, .. }) if field == "timeout_secs"
+    ));
+}
+
+#[test]
+fn test_proof_engine_enforces_postconditions() {
+    let invariant = InvariantSpec::new(
+        "zero_cost".to_string(),
+        "Cost must be zero".to_string(),
+        None,
+        Some("total_cost <= 0".to_string()),
+        vec![],
+        ProofType::EconomicInvariance,
+    );
+    let witness = ProofEngine::new()
+        .verify_invariants(
+            &sample_trace(),
+            &sample_capabilities(),
+            &sample_cost_ledger(),
+            &sample_policy_ir(),
+            &[invariant],
+        )
+        .expect("verification should produce a failed witness");
+
+    assert_eq!(witness.counterexamples.len(), 1);
+    assert_eq!(witness.counterexamples[0].error_type, "violation");
+    let bundle = ProofEngine::new()
+        .generate_bundle(&[witness])
+        .expect("bundle");
+    let result = Verifier::new().verify_bundle(&bundle);
+    assert!(!result.success);
+    assert_eq!(result.witness_results[0].counterexamples.len(), 1);
+}
+
+#[test]
+fn test_proof_engine_rejects_unsupported_expression_syntax() {
+    let invariant = InvariantSpec::new(
+        "unsupported".to_string(),
+        String::new(),
+        None,
+        Some("total_cost ~~ 1".to_string()),
+        vec![],
+        ProofType::EconomicInvariance,
+    );
+    let witness = ProofEngine::new()
+        .verify_invariants(
+            &sample_trace(),
+            &sample_capabilities(),
+            &sample_cost_ledger(),
+            &sample_policy_ir(),
+            &[invariant],
+        )
+        .expect("unsupported expression should create a failed witness");
+
+    assert_eq!(witness.counterexamples.len(), 1);
+    assert_eq!(witness.counterexamples[0].error_type, "check_error");
+}
+
+#[test]
+fn test_proof_engine_enforces_always_temporal_properties() {
+    let invariant = InvariantSpec::new(
+        "trace_is_empty".to_string(),
+        String::new(),
+        None,
+        None,
+        vec!["always false".to_string()],
+        ProofType::BehavioralSoundness,
+    );
+    let witness = ProofEngine::new()
+        .verify_invariants(
+            &sample_trace(),
+            &sample_capabilities(),
+            &sample_cost_ledger(),
+            &sample_policy_ir(),
+            &[invariant],
+        )
+        .expect("verification should produce a failed witness");
+
+    assert_eq!(witness.counterexamples.len(), 1);
+    assert_eq!(witness.counterexamples[0].error_type, "violation");
+}
+
 // ============================================================================
 // Verifier Tests
 // ============================================================================
@@ -240,7 +405,7 @@ fn test_verifier_valid_bundle() {
     let policy = sample_policy_ir();
 
     let bundle = mgr
-        .create_bundle(&trace, &caps, &cost, &policy)
+        .create_bundle_with_invariants(&trace, &caps, &cost, &policy, &valid_invariants())
         .expect("bundle creation");
 
     let verifier = Verifier::new();
@@ -260,7 +425,7 @@ fn test_verifier_json_output() {
     let policy = sample_policy_ir();
 
     let bundle = mgr
-        .create_bundle(&trace, &caps, &cost, &policy)
+        .create_bundle_with_invariants(&trace, &caps, &cost, &policy, &valid_invariants())
         .expect("bundle");
     let verifier = Verifier::new();
     let json = verifier.verify_bundle_json(&bundle);
@@ -270,6 +435,18 @@ fn test_verifier_json_output() {
         .and_then(|v| v.as_bool())
         .unwrap_or(false));
     assert!(json.get("bundle_id").is_some());
+    assert_eq!(
+        json.get("proof_version").and_then(|v| v.as_str()),
+        Some(PROOF_ALGORITHM_VERSION)
+    );
+    assert!(json.get("engine_max_invariants").is_some());
+    assert!(json
+        .get("witness_results")
+        .and_then(|v| v.as_array())
+        .and_then(|results| results.first())
+        .and_then(|result| result.get("counterexamples"))
+        .and_then(|v| v.as_array())
+        .is_some());
 }
 
 #[test]
@@ -281,7 +458,7 @@ fn test_verifier_rejects_tampered_witness_content_with_same_ids() {
     let policy = sample_policy_ir();
 
     let witness = engine
-        .verify_invariants(&trace, &caps, &cost, &policy, &[])
+        .verify_invariants(&trace, &caps, &cost, &policy, &valid_invariants())
         .expect("verify");
     let mut bundle = engine.generate_bundle(&[witness]).expect("bundle");
 
@@ -299,6 +476,75 @@ fn test_verifier_rejects_tampered_witness_content_with_same_ids() {
         .as_deref()
         .unwrap_or_default()
         .contains("Proof ID mismatch"));
+}
+
+#[test]
+fn test_verifier_rejects_zero_witness_bundle_with_canonical_id() {
+    let metadata = serde_json::Map::new();
+    let id = compute_content_hash(&serde_json::json!({
+        "witnesses": Vec::<String>::new(),
+        "metadata": metadata.clone(),
+    }));
+    let bundle = ProofBundle::new(id, vec![], metadata);
+
+    let result = Verifier::new().verify_bundle(&bundle);
+    assert!(!result.success);
+    assert!(result
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("at least one witness"));
+}
+
+#[test]
+fn test_verifier_rejects_tampered_counterexamples() {
+    let engine = ProofEngine::new();
+    let witness = engine
+        .verify_invariants(
+            &sample_trace(),
+            &sample_capabilities(),
+            &sample_cost_ledger(),
+            &sample_policy_ir(),
+            &valid_invariants(),
+        )
+        .expect("verify");
+    let mut bundle = engine.generate_bundle(&[witness]).expect("bundle");
+    bundle.witnesses[0].counterexamples.push(CounterExample {
+        invariant_name: "fabricated".to_string(),
+        error_type: "violation".to_string(),
+        details: serde_json::json!({"reason": "fabricated"}),
+        step_index: None,
+    });
+
+    let result = Verifier::new().verify_bundle(&bundle);
+    assert!(!result.success);
+    assert!(result.witness_results[0]
+        .error
+        .as_deref()
+        .unwrap_or_default()
+        .contains("counterexamples do not match"));
+}
+
+#[test]
+fn test_verifier_replays_with_committed_engine_configuration() {
+    let config = EngineConfig {
+        max_invariants: 10,
+        timeout_secs: 5.0,
+    };
+    let engine = ProofEngine::with_config(config.clone());
+    let witness = engine
+        .verify_invariants(
+            &sample_trace(),
+            &sample_capabilities(),
+            &sample_cost_ledger(),
+            &sample_policy_ir(),
+            &valid_invariants(),
+        )
+        .expect("verify");
+    let bundle = engine.generate_bundle(&[witness]).expect("bundle");
+
+    assert!(!Verifier::new().verify_bundle(&bundle).success);
+    assert!(Verifier::with_config(config).verify_bundle(&bundle).success);
 }
 
 // ============================================================================
@@ -442,6 +688,17 @@ fn test_cost_ledger_validation() {
         inf.validate(),
         Err(FakError::Validation { field, .. }) if field == "total_cost"
     ));
+
+    let inconsistent = CostLedger::new(
+        "id".to_string(),
+        vec![serde_json::json!({"cost": 100.0})],
+        0.0,
+        serde_json::Map::new(),
+    );
+    assert!(matches!(
+        inconsistent.validate(),
+        Err(FakError::Validation { field, .. }) if field == "total_cost"
+    ));
 }
 
 #[test]
@@ -471,6 +728,32 @@ fn test_invariant_spec_validation() {
     assert!(matches!(
         empty.validate(),
         Err(FakError::Validation { field, .. }) if field == "name"
+    ));
+
+    let no_assertion = InvariantSpec::new(
+        "named".to_string(),
+        String::new(),
+        None,
+        None,
+        vec![],
+        ProofType::BehavioralSoundness,
+    );
+    assert!(matches!(
+        no_assertion.validate(),
+        Err(FakError::Validation { field, .. }) if field == "invariant"
+    ));
+
+    let precondition_only = InvariantSpec::new(
+        "precondition_only".to_string(),
+        String::new(),
+        Some("true".to_string()),
+        None,
+        vec![],
+        ProofType::BehavioralSoundness,
+    );
+    assert!(matches!(
+        precondition_only.validate(),
+        Err(FakError::Validation { field, .. }) if field == "invariant"
     ));
 }
 
