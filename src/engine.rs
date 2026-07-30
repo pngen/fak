@@ -5,7 +5,10 @@ use crate::types::{
     InvariantSpec, PolicyIR, ProofBundle, ProofType, ProofWitness,
 };
 use serde::Serialize;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::Instant;
+
+/// Version of the proof algorithm and expression semantics committed into proof IDs.
+pub const PROOF_ALGORITHM_VERSION: &str = "fak-proof-v2";
 
 /// Configuration for proof engine resource limits.
 #[derive(Debug, Clone)]
@@ -40,6 +43,16 @@ impl ProofEngine {
         Self { config }
     }
 
+    /// Return the immutable engine configuration used for verification.
+    pub fn config(&self) -> &EngineConfig {
+        &self.config
+    }
+
+    /// Return the proof algorithm version committed into generated proof IDs.
+    pub fn algorithm_version(&self) -> &'static str {
+        PROOF_ALGORITHM_VERSION
+    }
+
     /// Verify invariants against governance artifacts.
     pub fn verify_invariants(
         &self,
@@ -49,13 +62,20 @@ impl ProofEngine {
         policy_ir: &PolicyIR,
         invariants: &[InvariantSpec],
     ) -> FakResult<ProofWitness> {
+        self.validate_config()?;
+
         // Validate inputs
         trace.validate()?;
         capabilities.validate()?;
         cost_ledger.validate()?;
         policy_ir.validate()?;
 
-        let start_time = self.current_time_secs();
+        if invariants.is_empty() {
+            return Err(FakError::Validation {
+                field: "invariants".to_string(),
+                message: "at least one invariant is required".to_string(),
+            });
+        }
 
         if invariants.len() > self.config.max_invariants {
             return Err(FakError::ResourceLimit {
@@ -65,26 +85,21 @@ impl ProofEngine {
             });
         }
 
+        // Invalid specifications are input errors, not proof counterexamples.
+        // Validate them before evaluation so this method never returns a
+        // witness that fails ProofWitness::validate().
+        for invariant in invariants {
+            invariant.validate()?;
+        }
+
+        let start_time = Instant::now();
         let mut counterexamples = Vec::new();
 
         for invariant in invariants {
-            let elapsed = self.current_time_secs() - start_time;
-            if elapsed > self.config.timeout_secs {
-                counterexamples.push(CounterExample {
-                    invariant_name: invariant.name.clone(),
-                    error_type: "timeout".to_string(),
-                    details: serde_json::json!({
-                        "reason": "Verification timed out",
-                        "elapsed_secs": elapsed,
-                        "limit_secs": self.config.timeout_secs
-                    }),
-                    step_index: None,
-                });
-                break;
-            }
+            self.check_timeout(start_time)?;
 
             match self.check_invariant(trace, capabilities, cost_ledger, policy_ir, invariant) {
-                Ok(true) => continue,
+                Ok(true) => {}
                 Ok(false) => counterexamples.push(CounterExample {
                     invariant_name: invariant.name.clone(),
                     error_type: "violation".to_string(),
@@ -101,9 +116,16 @@ impl ProofEngine {
                     step_index: None,
                 }),
             }
+
+            self.check_timeout(start_time)?;
         }
 
         let proof_content = serde_json::json!({
+            "algorithm_version": PROOF_ALGORITHM_VERSION,
+            "engine_config": {
+                "max_invariants": self.config.max_invariants,
+                "timeout_secs": self.config.timeout_secs,
+            },
             "trace_hash": content_hash_for(trace)?,
             "capabilities_hash": content_hash_for(capabilities)?,
             "cost_ledger_hash": content_hash_for(cost_ledger)?,
@@ -112,9 +134,12 @@ impl ProofEngine {
                 .iter()
                 .map(content_hash_for)
                 .collect::<FakResult<Vec<_>>>()?,
+            "counterexamples": &counterexamples,
+            "outcome": if counterexamples.is_empty() { "pass" } else { "fail" },
         });
 
         let proof_id = compute_content_hash(&proof_content);
+        self.check_timeout(start_time)?;
 
         Ok(ProofWitness {
             proof_id,
@@ -127,6 +152,33 @@ impl ProofEngine {
         })
     }
 
+    fn validate_config(&self) -> FakResult<()> {
+        if self.config.max_invariants == 0 {
+            return Err(FakError::Validation {
+                field: "max_invariants".to_string(),
+                message: "max_invariants must be greater than zero".to_string(),
+            });
+        }
+        if !self.config.timeout_secs.is_finite() || self.config.timeout_secs <= 0.0 {
+            return Err(FakError::Validation {
+                field: "timeout_secs".to_string(),
+                message: "timeout_secs must be finite and greater than zero".to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    fn check_timeout(&self, start_time: Instant) -> FakResult<()> {
+        let elapsed = start_time.elapsed().as_secs_f64();
+        if elapsed > self.config.timeout_secs {
+            return Err(FakError::Timeout {
+                operation: "invariant verification".to_string(),
+                limit_secs: self.config.timeout_secs,
+            });
+        }
+        Ok(())
+    }
+
     fn check_invariant(
         &self,
         trace: &ExecutionTrace,
@@ -137,57 +189,32 @@ impl ProofEngine {
     ) -> FakResult<bool> {
         invariant.validate()?;
 
-        match invariant.invariant_type {
-            ProofType::BehavioralSoundness => self.check_behavioral_soundness(trace, invariant),
-            ProofType::AuthorityNonEscalation => {
-                self.check_authority_non_escalation(capabilities, invariant)
-            }
-            ProofType::EconomicInvariance => self.check_economic_invariance(cost_ledger, invariant),
-            ProofType::SemanticPreservation => {
-                self.check_semantic_preservation(policy_ir, invariant)
+        let context = match invariant.invariant_type {
+            ProofType::BehavioralSoundness => EvaluationContext::Behavioral(trace),
+            ProofType::AuthorityNonEscalation => EvaluationContext::Authority(capabilities),
+            ProofType::EconomicInvariance => EvaluationContext::Economic(cost_ledger),
+            ProofType::SemanticPreservation => EvaluationContext::Semantic(policy_ir),
+        };
+
+        if let Some(precondition) = invariant.precondition.as_deref() {
+            if !evaluate_expression(precondition, &context, invariant)? {
+                return Ok(true);
             }
         }
-    }
 
-    fn check_behavioral_soundness(
-        &self,
-        trace: &ExecutionTrace,
-        inv: &InvariantSpec,
-    ) -> FakResult<bool> {
-        // Trace must be non-empty if precondition exists
-        Ok(!trace.steps.is_empty() || inv.precondition.is_none())
-    }
+        if let Some(postcondition) = invariant.postcondition.as_deref() {
+            if !evaluate_expression(postcondition, &context, invariant)? {
+                return Ok(false);
+            }
+        }
 
-    fn check_authority_non_escalation(
-        &self,
-        caps: &CapabilityManifest,
-        inv: &InvariantSpec,
-    ) -> FakResult<bool> {
-        // Authority graph must be non-empty if precondition exists
-        Ok(!caps.authority_graph.is_empty() || inv.precondition.is_none())
-    }
+        for temporal_property in &invariant.temporal_properties {
+            if !evaluate_temporal_property(temporal_property, &context, invariant)? {
+                return Ok(false);
+            }
+        }
 
-    fn check_economic_invariance(
-        &self,
-        ledger: &CostLedger,
-        _inv: &InvariantSpec,
-    ) -> FakResult<bool> {
-        Ok(ledger.total_cost >= 0.0)
-    }
-
-    fn check_semantic_preservation(
-        &self,
-        policy: &PolicyIR,
-        _inv: &InvariantSpec,
-    ) -> FakResult<bool> {
-        Ok(!policy.id.is_empty())
-    }
-
-    fn current_time_secs(&self) -> f64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs_f64())
-            .unwrap_or(0.0)
+        Ok(true)
     }
 
     /// Generate a proof bundle from witnesses.
@@ -215,6 +242,240 @@ impl ProofEngine {
             witnesses: witnesses.to_vec(),
             metadata: serde_json::Map::new(),
         })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum EvaluationValue {
+    Boolean(bool),
+    Number(f64),
+}
+
+enum EvaluationContext<'a> {
+    Behavioral(&'a ExecutionTrace),
+    Authority(&'a CapabilityManifest),
+    Economic(&'a CostLedger),
+    Semantic(&'a PolicyIR),
+}
+
+fn evaluate_temporal_property(
+    temporal_property: &str,
+    context: &EvaluationContext<'_>,
+    invariant: &InvariantSpec,
+) -> FakResult<bool> {
+    let trimmed = temporal_property.trim();
+    let mut parts = trimmed.splitn(2, |character: char| character.is_whitespace());
+    let operator = parts.next().unwrap_or_default();
+    let expression = parts.next().unwrap_or_default().trim();
+
+    if operator != "always" || expression.is_empty() {
+        return Err(verification_failure(
+            invariant,
+            format!(
+                "unsupported temporal property '{}'; expected 'always <expression>'",
+                temporal_property
+            ),
+        ));
+    }
+
+    evaluate_expression(expression, context, invariant)
+}
+
+fn evaluate_expression(
+    expression: &str,
+    context: &EvaluationContext<'_>,
+    invariant: &InvariantSpec,
+) -> FakResult<bool> {
+    let expression = expression.trim();
+    if expression.is_empty() {
+        return Err(verification_failure(
+            invariant,
+            "expression cannot be empty",
+        ));
+    }
+
+    match split_comparison(expression) {
+        Ok(Some((left, operator, right))) => {
+            let left = resolve_numeric_operand(left, context, invariant)?;
+            let right = resolve_numeric_operand(right, context, invariant)?;
+            Ok(match operator {
+                "<=" => left <= right,
+                ">=" => left >= right,
+                "==" => left == right,
+                "!=" => left != right,
+                "<" => left < right,
+                ">" => left > right,
+                _ => unreachable!("comparison parser returned a known operator"),
+            })
+        }
+        Ok(None) => match resolve_value(expression, context, invariant)? {
+            EvaluationValue::Boolean(value) => Ok(value),
+            EvaluationValue::Number(_) => Err(verification_failure(
+                invariant,
+                format!(
+                    "numeric expression '{}' requires an explicit comparison",
+                    expression
+                ),
+            )),
+        },
+        Err(reason) => Err(verification_failure(invariant, reason)),
+    }
+}
+
+fn split_comparison(expression: &str) -> Result<Option<(&str, &str, &str)>, String> {
+    let mut matches = Vec::new();
+    let mut characters = expression.char_indices().peekable();
+
+    while let Some((index, character)) = characters.next() {
+        let (operator, length) = match character {
+            '<' if expression[index..].starts_with("<=") => ("<=", 2),
+            '>' if expression[index..].starts_with(">=") => (">=", 2),
+            '=' if expression[index..].starts_with("==") => ("==", 2),
+            '!' if expression[index..].starts_with("!=") => ("!=", 2),
+            '<' => ("<", 1),
+            '>' => (">", 1),
+            _ => continue,
+        };
+
+        matches.push((index, operator, length));
+        if length == 2 {
+            characters.next();
+        }
+    }
+
+    match matches.as_slice() {
+        [] => Ok(None),
+        [(operator_index, operator, operator_length)] => {
+            let left = expression[..*operator_index].trim();
+            let right = expression[*operator_index + *operator_length..].trim();
+            if left.is_empty() || right.is_empty() {
+                return Err(format!("malformed comparison '{}'", expression));
+            }
+            Ok(Some((left, *operator, right)))
+        }
+        _ => Err(format!(
+            "chained or ambiguous comparisons are unsupported: '{}'",
+            expression
+        )),
+    }
+}
+
+fn resolve_numeric_operand(
+    operand: &str,
+    context: &EvaluationContext<'_>,
+    invariant: &InvariantSpec,
+) -> FakResult<f64> {
+    match resolve_value(operand, context, invariant)? {
+        EvaluationValue::Number(value) => Ok(value),
+        EvaluationValue::Boolean(_) => Err(verification_failure(
+            invariant,
+            format!("boolean operand '{}' cannot be used numerically", operand),
+        )),
+    }
+}
+
+fn resolve_value(
+    operand: &str,
+    context: &EvaluationContext<'_>,
+    invariant: &InvariantSpec,
+) -> FakResult<EvaluationValue> {
+    let operand = operand.trim();
+    match operand {
+        "true" => return Ok(EvaluationValue::Boolean(true)),
+        "false" => return Ok(EvaluationValue::Boolean(false)),
+        _ => {}
+    }
+
+    if let Ok(value) = operand.parse::<f64>() {
+        if value.is_finite() {
+            return Ok(EvaluationValue::Number(value));
+        }
+        return Err(verification_failure(
+            invariant,
+            format!("numeric literal '{}' must be finite", operand),
+        ));
+    }
+
+    let value = match context {
+        EvaluationContext::Behavioral(trace) => match operand {
+            "step_count" => EvaluationValue::Number(trace.steps.len() as f64),
+            "trace_nonempty" => EvaluationValue::Boolean(!trace.steps.is_empty()),
+            _ => return Err(unsupported_variable(invariant, operand)),
+        },
+        EvaluationContext::Authority(capabilities) => match operand {
+            "capability_count" => EvaluationValue::Number(capabilities.capabilities.len() as f64),
+            "authority_graph_nonempty" => {
+                EvaluationValue::Boolean(!capabilities.authority_graph.is_empty())
+            }
+            _ => return Err(unsupported_variable(invariant, operand)),
+        },
+        EvaluationContext::Economic(cost_ledger) => match operand {
+            "total_cost" => EvaluationValue::Number(cost_ledger.total_cost),
+            "entry_count" => EvaluationValue::Number(cost_ledger.entries.len() as f64),
+            "entries_total" => EvaluationValue::Number(cost_entries_total(cost_ledger, invariant)?),
+            _ => return Err(unsupported_variable(invariant, operand)),
+        },
+        EvaluationContext::Semantic(policy_ir) => match operand {
+            "policy_id_nonempty" => EvaluationValue::Boolean(!policy_ir.id.is_empty()),
+            "ast_nonempty" => EvaluationValue::Boolean(!policy_ir.ast.is_empty()),
+            "compiled_enforcement_nonempty" => {
+                EvaluationValue::Boolean(!policy_ir.compiled_enforcement.is_empty())
+            }
+            _ => return Err(unsupported_variable(invariant, operand)),
+        },
+    };
+
+    Ok(value)
+}
+
+fn cost_entries_total(ledger: &CostLedger, invariant: &InvariantSpec) -> FakResult<f64> {
+    let mut total = 0.0;
+    for (index, entry) in ledger.entries.iter().enumerate() {
+        let value = entry
+            .as_object()
+            .and_then(|object| object.get("total_cost").or_else(|| object.get("cost")))
+            .and_then(serde_json::Value::as_f64)
+            .ok_or_else(|| {
+                verification_failure(
+                    invariant,
+                    format!(
+                        "cost entry {} must contain a numeric 'total_cost' or 'cost' field",
+                        index
+                    ),
+                )
+            })?;
+        if !value.is_finite() {
+            return Err(verification_failure(
+                invariant,
+                format!("cost entry {} must contain a finite cost", index),
+            ));
+        }
+        total += value;
+        if !total.is_finite() {
+            return Err(verification_failure(
+                invariant,
+                "sum of cost entries must be finite",
+            ));
+        }
+    }
+    Ok(total)
+}
+
+fn unsupported_variable(invariant: &InvariantSpec, variable: &str) -> FakError {
+    verification_failure(
+        invariant,
+        format!(
+            "unsupported variable '{}' for {} invariant",
+            variable,
+            invariant.invariant_type.as_str()
+        ),
+    )
+}
+
+fn verification_failure(invariant: &InvariantSpec, reason: impl Into<String>) -> FakError {
+    FakError::VerificationFailure {
+        invariant: invariant.name.clone(),
+        reason: reason.into(),
     }
 }
 

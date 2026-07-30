@@ -3,7 +3,8 @@
 use crate::engine::ProofEngine;
 use crate::error::{FakError, FakResult};
 use crate::types::{
-    compute_content_hash, CapabilityManifest, CostLedger, ExecutionTrace, PolicyIR, ProofBundle,
+    compute_content_hash, CapabilityManifest, CostLedger, ExecutionTrace, InvariantSpec, PolicyIR,
+    ProofBundle,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -66,16 +67,42 @@ impl ArtifactManager {
     /// Create a proof bundle from governance artifacts.
     pub fn create_bundle(
         &self,
+        _trace: &ExecutionTrace,
+        _capabilities: &CapabilityManifest,
+        _cost_ledger: &CostLedger,
+        _policy_ir: &PolicyIR,
+    ) -> FakResult<ProofBundle> {
+        Err(FakError::Validation {
+            field: "invariants".to_string(),
+            message: "at least one invariant is required; use create_bundle_with_invariants"
+                .to_string(),
+        })
+    }
+
+    /// Create a proof bundle from governance artifacts and explicit invariants.
+    ///
+    /// Verification and bundle construction complete before artifacts are stored,
+    /// so a failed proof cannot leave partially persisted inputs behind.
+    pub fn create_bundle_with_invariants(
+        &self,
         trace: &ExecutionTrace,
         capabilities: &CapabilityManifest,
         cost_ledger: &CostLedger,
         policy_ir: &PolicyIR,
+        invariants: &[InvariantSpec],
     ) -> FakResult<ProofBundle> {
-        // Validate inputs
-        trace.validate()?;
-        capabilities.validate()?;
-        cost_ledger.validate()?;
-        policy_ir.validate()?;
+        if invariants.is_empty() {
+            return Err(FakError::Validation {
+                field: "invariants".to_string(),
+                message: "at least one invariant is required".to_string(),
+            });
+        }
+
+        // Verify and construct the complete bundle before mutating storage.
+        let engine = ProofEngine::new();
+        let witness =
+            engine.verify_invariants(trace, capabilities, cost_ledger, policy_ir, invariants)?;
+        let bundle = engine.generate_bundle(&[witness])?;
 
         // Serialize artifacts
         let trace_json = serde_json::to_value(trace)?;
@@ -83,22 +110,27 @@ impl ArtifactManager {
         let cost_json = serde_json::to_value(cost_ledger)?;
         let policy_json = serde_json::to_value(policy_ir)?;
 
-        // Store artifacts
-        let trace_id = self.store_artifact(&trace_json)?;
-        let cap_id = self.store_artifact(&cap_json)?;
-        let cost_id = self.store_artifact(&cost_json)?;
-        let policy_id = self.store_artifact(&policy_json)?;
+        // Compute and verify every content address before mutating storage.
+        let trace_id = compute_content_hash(&trace_json);
+        let cap_id = compute_content_hash(&cap_json);
+        let cost_id = compute_content_hash(&cost_json);
+        let policy_id = compute_content_hash(&policy_json);
 
-        // Validate integrity
         self.verify_integrity(&trace_id, &trace_json, "trace")?;
         self.verify_integrity(&cap_id, &cap_json, "capability_manifest")?;
         self.verify_integrity(&cost_id, &cost_json, "cost_ledger")?;
         self.verify_integrity(&policy_id, &policy_json, "policy_ir")?;
 
-        // Generate proof
-        let engine = ProofEngine::new();
-        let witness = engine.verify_invariants(trace, capabilities, cost_ledger, policy_ir, &[])?;
-        engine.generate_bundle(&[witness])
+        // Store the verified artifacts atomically under a single write lock.
+        let mut artifacts = self.artifacts.write().map_err(|_| FakError::LockPoisoned {
+            resource: "artifacts".to_string(),
+        })?;
+        artifacts.insert(trace_id, trace_json);
+        artifacts.insert(cap_id, cap_json);
+        artifacts.insert(cost_id, cost_json);
+        artifacts.insert(policy_id, policy_json);
+
+        Ok(bundle)
     }
 
     fn verify_integrity(

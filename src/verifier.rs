@@ -1,8 +1,12 @@
 //! Standalone verifier for FAK proof bundles.
 
-use crate::engine::{EngineConfig, ProofEngine};
-use crate::types::{compute_content_hash, ProofBundle, ProofWitness};
+use crate::engine::{EngineConfig, ProofEngine, PROOF_ALGORITHM_VERSION};
+use crate::error::FakError;
+use crate::types::{compute_content_hash, CounterExample, ProofBundle, ProofWitness};
 use serde::{Deserialize, Serialize};
+
+const PROOF_ALGORITHM: &str = "fak-invariant-replay";
+const PROOF_VERSION: &str = PROOF_ALGORITHM_VERSION;
 
 /// Verification result for a single witness.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -11,7 +15,17 @@ pub struct WitnessResult {
     pub success: bool,
     pub invariant_count: usize,
     pub counterexample_count: usize,
+    #[serde(default)]
+    pub counterexamples: Vec<CounterExample>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub proof_algorithm: String,
+    #[serde(default)]
+    pub proof_version: String,
+    #[serde(default)]
+    pub engine_max_invariants: usize,
+    #[serde(default)]
+    pub engine_timeout_secs: f64,
 }
 
 /// Verification result for an entire bundle.
@@ -21,12 +35,21 @@ pub struct BundleResult {
     pub success: bool,
     pub witness_results: Vec<WitnessResult>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub proof_algorithm: String,
+    #[serde(default)]
+    pub proof_version: String,
+    #[serde(default)]
+    pub engine_max_invariants: usize,
+    #[serde(default)]
+    pub engine_timeout_secs: f64,
 }
 
 /// Standalone verifier for proof bundles.
 #[derive(Debug, Clone)]
 pub struct Verifier {
     engine: ProofEngine,
+    config: EngineConfig,
 }
 
 impl Verifier {
@@ -37,8 +60,48 @@ impl Verifier {
 
     /// Create a verifier with custom engine configuration.
     pub fn with_config(config: EngineConfig) -> Self {
-        Self {
-            engine: ProofEngine::with_config(config),
+        let engine = ProofEngine::with_config(config.clone());
+        Self { engine, config }
+    }
+
+    fn bundle_result(
+        &self,
+        bundle_id: String,
+        success: bool,
+        witness_results: Vec<WitnessResult>,
+        error: Option<String>,
+    ) -> BundleResult {
+        BundleResult {
+            bundle_id,
+            success,
+            witness_results,
+            error,
+            proof_algorithm: PROOF_ALGORITHM.to_string(),
+            proof_version: PROOF_VERSION.to_string(),
+            engine_max_invariants: self.config.max_invariants,
+            engine_timeout_secs: self.config.timeout_secs,
+        }
+    }
+
+    fn witness_result(
+        &self,
+        proof_id: String,
+        success: bool,
+        invariant_count: usize,
+        counterexamples: Vec<CounterExample>,
+        error: Option<String>,
+    ) -> WitnessResult {
+        WitnessResult {
+            proof_id,
+            success,
+            invariant_count,
+            counterexample_count: counterexamples.len(),
+            counterexamples,
+            error,
+            proof_algorithm: PROOF_ALGORITHM.to_string(),
+            proof_version: PROOF_VERSION.to_string(),
+            engine_max_invariants: self.config.max_invariants,
+            engine_timeout_secs: self.config.timeout_secs,
         }
     }
 
@@ -46,26 +109,34 @@ impl Verifier {
     pub fn verify_bundle(&self, bundle: &ProofBundle) -> BundleResult {
         // Validate bundle structure
         if let Err(e) = bundle.validate() {
-            return BundleResult {
-                bundle_id: bundle.id.clone(),
-                success: false,
-                witness_results: Vec::new(),
-                error: Some(e.to_string()),
+            return self.bundle_result(bundle.id.clone(), false, Vec::new(), Some(e.to_string()));
+        }
+
+        if bundle.witnesses.is_empty() {
+            let error = FakError::Validation {
+                field: "witnesses".to_string(),
+                message: "ProofBundle must contain at least one witness".to_string(),
             };
+            return self.bundle_result(
+                bundle.id.clone(),
+                false,
+                Vec::new(),
+                Some(error.to_string()),
+            );
         }
 
         // Verify bundle ID integrity
         let expected_id = self.compute_bundle_id(bundle);
         if expected_id != bundle.id {
-            return BundleResult {
-                bundle_id: bundle.id.clone(),
-                success: false,
-                witness_results: Vec::new(),
-                error: Some(format!(
+            return self.bundle_result(
+                bundle.id.clone(),
+                false,
+                Vec::new(),
+                Some(format!(
                     "Bundle ID mismatch: expected '{}', got '{}'",
                     expected_id, bundle.id
                 )),
-            };
+            );
         }
 
         // Verify each witness
@@ -80,23 +151,18 @@ impl Verifier {
             witness_results.push(result);
         }
 
-        BundleResult {
-            bundle_id: bundle.id.clone(),
-            success: overall_success,
-            witness_results,
-            error: None,
-        }
+        self.bundle_result(bundle.id.clone(), overall_success, witness_results, None)
     }
 
     fn verify_witness(&self, witness: &ProofWitness) -> WitnessResult {
         if let Err(e) = witness.validate() {
-            return WitnessResult {
-                proof_id: witness.proof_id.clone(),
-                success: false,
-                invariant_count: witness.invariants.len(),
-                counterexample_count: 0,
-                error: Some(e.to_string()),
-            };
+            return self.witness_result(
+                witness.proof_id.clone(),
+                false,
+                witness.invariants.len(),
+                Vec::new(),
+                Some(e.to_string()),
+            );
         }
 
         match self.engine.verify_invariants(
@@ -108,33 +174,47 @@ impl Verifier {
         ) {
             Ok(reverified) => {
                 if reverified.proof_id != witness.proof_id {
-                    return WitnessResult {
-                        proof_id: witness.proof_id.clone(),
-                        success: false,
-                        invariant_count: witness.invariants.len(),
-                        counterexample_count: reverified.counterexamples.len(),
-                        error: Some(format!(
+                    return self.witness_result(
+                        witness.proof_id.clone(),
+                        false,
+                        witness.invariants.len(),
+                        reverified.counterexamples,
+                        Some(format!(
                             "Proof ID mismatch: expected '{}', got '{}'",
                             witness.proof_id, reverified.proof_id
                         )),
-                    };
+                    );
                 }
 
-                WitnessResult {
-                    proof_id: witness.proof_id.clone(),
-                    success: reverified.counterexamples.is_empty(),
-                    invariant_count: witness.invariants.len(),
-                    counterexample_count: reverified.counterexamples.len(),
-                    error: None,
+                if reverified.counterexamples != witness.counterexamples {
+                    return self.witness_result(
+                        witness.proof_id.clone(),
+                        false,
+                        witness.invariants.len(),
+                        reverified.counterexamples,
+                        Some(
+                            "Stored counterexamples do not match replayed counterexamples"
+                                .to_string(),
+                        ),
+                    );
                 }
+
+                let success = reverified.counterexamples.is_empty();
+                self.witness_result(
+                    witness.proof_id.clone(),
+                    success,
+                    witness.invariants.len(),
+                    reverified.counterexamples,
+                    None,
+                )
             }
-            Err(e) => WitnessResult {
-                proof_id: witness.proof_id.clone(),
-                success: false,
-                invariant_count: witness.invariants.len(),
-                counterexample_count: 0,
-                error: Some(e.to_string()),
-            },
+            Err(e) => self.witness_result(
+                witness.proof_id.clone(),
+                false,
+                witness.invariants.len(),
+                Vec::new(),
+                Some(e.to_string()),
+            ),
         }
     }
 
@@ -161,8 +241,6 @@ impl Verifier {
 
 impl Default for Verifier {
     fn default() -> Self {
-        Self {
-            engine: ProofEngine::new(),
-        }
+        Self::with_config(EngineConfig::default())
     }
 }
