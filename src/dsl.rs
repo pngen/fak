@@ -36,7 +36,7 @@ impl InvariantDSL {
         let fields = Self::extract_fields(&spec_str_clean);
         let temporal_properties = Self::parse_temporal_properties_list(
             fields.get("temporal_properties").map(|s| s.as_str()),
-        );
+        )?;
         let invariant_type = Self::extract_type(&spec_str_clean)?;
 
         Ok(InvariantSpec {
@@ -110,14 +110,23 @@ impl InvariantDSL {
             .map(|m| m.as_str().trim().to_string())
     }
 
-    fn parse_temporal_properties_list(props_str: Option<&str>) -> Vec<String> {
+    fn parse_temporal_properties_list(props_str: Option<&str>) -> FakResult<Vec<String>> {
         match props_str {
-            Some(s) if s.starts_with('[') && s.ends_with(']') => s[1..s.len() - 1]
+            None => Ok(Vec::new()),
+            Some(s) if s.starts_with('[') && s.ends_with(']') => Ok(s[1..s.len() - 1]
                 .split(',')
                 .map(|p| p.trim().to_string())
                 .filter(|p| !p.is_empty())
-                .collect(),
-            _ => Vec::new(),
+                .collect()),
+            // A declared list that is not bracketed must not be read as "no
+            // temporal properties": the invariant would be proven without them.
+            Some(s) => Err(FakError::ParseError {
+                source: "temporal_properties".to_string(),
+                message: format!(
+                    "expected a bracketed list such as [always <expression>], got: {}",
+                    s
+                ),
+            }),
         }
     }
 

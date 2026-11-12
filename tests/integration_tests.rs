@@ -392,6 +392,55 @@ fn test_proof_engine_enforces_always_temporal_properties() {
     assert_eq!(witness.counterexamples[0].error_type, "violation");
 }
 
+#[test]
+fn test_entries_total_uses_the_validated_entry_cost() {
+    // CostLedger::validate reconciles total_cost against each entry's `cost`.
+    // A proof must evaluate that same reconciled amount even when an entry also
+    // carries an unreconciled `total_cost` field.
+    let ledger = CostLedger::new(
+        "cost-001".to_string(),
+        vec![serde_json::json!({"cost": 100.0, "total_cost": 1.0})],
+        100.0,
+        serde_json::Map::new(),
+    );
+    ledger
+        .validate()
+        .expect("entry cost reconciles with the ledger total");
+
+    let invariants = vec![
+        InvariantSpec::new(
+            "entries_bounded".to_string(),
+            String::new(),
+            None,
+            Some("entries_total <= 10".to_string()),
+            vec![],
+            ProofType::EconomicInvariance,
+        ),
+        InvariantSpec::new(
+            "entries_reconciled".to_string(),
+            String::new(),
+            None,
+            Some("entries_total == total_cost".to_string()),
+            vec![],
+            ProofType::EconomicInvariance,
+        ),
+    ];
+
+    let witness = ProofEngine::new()
+        .verify_invariants(
+            &sample_trace(),
+            &sample_capabilities(),
+            &ledger,
+            &sample_policy_ir(),
+            &invariants,
+        )
+        .expect("verification should produce a witness");
+
+    assert_eq!(witness.counterexamples.len(), 1);
+    assert_eq!(witness.counterexamples[0].invariant_name, "entries_bounded");
+    assert_eq!(witness.counterexamples[0].error_type, "violation");
+}
+
 // ============================================================================
 // Verifier Tests
 // ============================================================================
@@ -597,6 +646,30 @@ fn test_dsl_unknown_type_fails() {
 
     let result = InvariantDSL::parse_invariant(spec);
     assert!(matches!(result, Err(FakError::UnknownProofType { .. })));
+}
+
+#[test]
+fn test_dsl_rejects_unbracketed_temporal_properties() {
+    // Reading a declared but malformed list as "no temporal properties" would
+    // let the invariant be proven without the property it states.
+    let spec = r#"
+        invariant cost_bound
+        type: economic_invariance
+        postcondition: total_cost >= 0
+        temporal_properties: always total_cost <= 10
+    "#;
+
+    let result = InvariantDSL::parse_invariant(spec);
+    assert!(matches!(result, Err(FakError::ParseError { .. })));
+
+    let bracketed = InvariantDSL::parse_invariant(
+        &spec.replace("always total_cost <= 10", "[always total_cost <= 10]"),
+    )
+    .expect("bracketed list should parse");
+    assert_eq!(
+        bracketed.temporal_properties,
+        vec!["always total_cost <= 10"]
+    );
 }
 
 #[test]

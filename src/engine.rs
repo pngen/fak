@@ -431,9 +431,12 @@ fn resolve_value(
 fn cost_entries_total(ledger: &CostLedger, invariant: &InvariantSpec) -> FakResult<f64> {
     let mut total = 0.0;
     for (index, entry) in ledger.entries.iter().enumerate() {
+        // `cost` is the field CostLedger::validate reconciles against the ledger
+        // total, so it must take precedence: evaluating an unreconciled
+        // `total_cost` field would prove a bound about a different amount.
         let value = entry
             .as_object()
-            .and_then(|object| object.get("total_cost").or_else(|| object.get("cost")))
+            .and_then(|object| object.get("cost").or_else(|| object.get("total_cost")))
             .and_then(serde_json::Value::as_f64)
             .ok_or_else(|| {
                 verification_failure(
