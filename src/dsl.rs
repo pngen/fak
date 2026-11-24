@@ -25,13 +25,16 @@ fn get_invariant_re() -> &'static Regex {
 }
 
 fn get_type_re() -> &'static Regex {
-    TYPE_RE.get_or_init(|| Regex::new(r"type:\s*(\w+)").expect("valid regex"))
+    // Declarations start a line. Text inside another field's value (for example
+    // a description that mentions `type: ...`) is not a declaration.
+    TYPE_RE.get_or_init(|| Regex::new(r"(?m)^type:\s*(\w+)").expect("valid regex"))
 }
 
 impl InvariantDSL {
     /// Parse an invariant specification from DSL text.
     pub fn parse_invariant(spec_str: &str) -> FakResult<InvariantSpec> {
         let spec_str_clean = Self::strip_comments(spec_str);
+        Self::reject_duplicate_declarations(&spec_str_clean)?;
         let name = Self::extract_name(&spec_str_clean)?;
         let fields = Self::extract_fields(&spec_str_clean);
         let temporal_properties = Self::parse_temporal_properties_list(
@@ -68,6 +71,32 @@ impl InvariantDSL {
             .join("\n")
     }
 
+    /// A field may be declared once. Reading only the first of two
+    /// declarations would prove the invariant without the other one.
+    fn reject_duplicate_declarations(spec_str: &str) -> FakResult<()> {
+        for field_name in [
+            "description",
+            "precondition",
+            "postcondition",
+            "temporal_properties",
+            "type",
+        ] {
+            let declaration = format!("{}:", field_name);
+            if spec_str
+                .lines()
+                .filter(|line| line.starts_with(&declaration))
+                .count()
+                > 1
+            {
+                return Err(FakError::ParseError {
+                    source: field_name.to_string(),
+                    message: "field is declared more than once".to_string(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     fn extract_name(spec_str: &str) -> FakResult<String> {
         get_invariant_re()
             .captures(spec_str)
@@ -102,7 +131,7 @@ impl InvariantDSL {
     }
 
     fn extract_field_value(spec_str: &str, field_name: &str) -> Option<String> {
-        let pattern = format!(r"{}:\s*(.+)", field_name);
+        let pattern = format!(r"(?m)^{}:\s*(.+)", field_name);
         Regex::new(&pattern)
             .ok()?
             .captures(spec_str)?

@@ -601,6 +601,48 @@ fn test_verifier_replays_with_committed_engine_configuration() {
 // ============================================================================
 
 #[test]
+fn test_dsl_rejects_duplicate_and_embedded_field_declarations() {
+    // The second postcondition is the bound. Reading only the first would
+    // prove the invariant without it.
+    let duplicate = r#"
+        invariant cost_bound
+        type: economic_invariance
+        postcondition: total_cost >= 0
+        postcondition: total_cost <= 10
+    "#;
+    assert!(matches!(
+        InvariantDSL::parse_invariant(duplicate),
+        Err(FakError::ParseError { .. })
+    ));
+
+    for field in ["precondition", "temporal_properties", "type"] {
+        let spec = format!(
+            "invariant twice\npostcondition: true\n{field}: [always true]\n{field}: [always false]\n"
+        );
+        assert!(
+            matches!(
+                InvariantDSL::parse_invariant(&spec),
+                Err(FakError::ParseError { .. })
+            ),
+            "duplicate {} was accepted",
+            field
+        );
+    }
+
+    // Text inside a description is not a declaration and must not replace the
+    // postcondition declared on its own line.
+    let embedded = r#"
+        invariant cost_bound
+        description: tightened from postcondition: total_cost >= 0
+        type: economic_invariance
+        postcondition: total_cost <= 10
+    "#;
+    let parsed = InvariantDSL::parse_invariant(embedded).expect("parse");
+    assert_eq!(parsed.postcondition.as_deref(), Some("total_cost <= 10"));
+    assert_eq!(parsed.invariant_type, ProofType::EconomicInvariance);
+}
+
+#[test]
 fn test_dsl_parse_invariant() {
     let spec = r#"
         invariant cost_bound
